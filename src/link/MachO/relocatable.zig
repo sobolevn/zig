@@ -37,11 +37,11 @@ pub fn flushObject(macho_file: *MachO, comp: *Compilation, module_obj_path: ?[]c
         };
     }
 
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (macho_file.base.hasErrors()) return error.FlushFailure;
 
     try macho_file.parseInputFiles();
 
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (macho_file.base.hasErrors()) return error.FlushFailure;
 
     try macho_file.resolveSymbols();
     try macho_file.dedupLiterals();
@@ -102,11 +102,11 @@ pub fn flushStaticLib(macho_file: *MachO, comp: *Compilation, module_obj_path: ?
         };
     }
 
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (macho_file.base.hasErrors()) return error.FlushFailure;
 
     try parseInputFilesAr(macho_file);
 
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (macho_file.base.hasErrors()) return error.FlushFailure;
 
     // First, we flush relocatable object file generated with our backends.
     if (macho_file.getZigObject()) |zo| {
@@ -223,7 +223,7 @@ pub fn flushStaticLib(macho_file: *MachO, comp: *Compilation, module_obj_path: ?
     try macho_file.base.file.?.setEndPos(total_size);
     try macho_file.base.file.?.pwriteAll(buffer.items, 0);
 
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (macho_file.base.hasErrors()) return error.FlushFailure;
 }
 
 fn parseInputFilesAr(macho_file: *MachO) !void {

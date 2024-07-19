@@ -97,8 +97,9 @@ c_object_table: std.AutoArrayHashMapUnmanaged(*CObject, void) = .{},
 win32_resource_table: if (build_options.only_core_functionality) void else std.AutoArrayHashMapUnmanaged(*Win32Resource, void) =
     if (build_options.only_core_functionality) {} else .{},
 
-link_error_flags: link.File.ErrorFlags = .{},
 link_errors: std.ArrayListUnmanaged(link.File.ErrorMsg) = .{},
+link_errors_mutex: std.Thread.Mutex = .{},
+link_error_flags: link.File.ErrorFlags = .{},
 lld_errors: std.ArrayListUnmanaged(LldError) = .{},
 
 work_queues: [
@@ -3057,7 +3058,6 @@ pub fn totalErrorCount(comp: *Compilation) u32 {
         total += @intFromBool(comp.link_error_flags.no_entry_point_found);
     }
     total += @intFromBool(comp.link_error_flags.missing_libc);
-
     total += comp.link_errors.items.len;
 
     // Compile log errors only count if there are no other errors.

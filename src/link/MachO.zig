@@ -469,7 +469,7 @@ pub fn flushModule(self: *MachO, arena: Allocator, tid: Zcu.PerThread.Id, prog_n
         };
     }
 
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (self.base.hasErrors()) return error.FlushFailure;
 
     try self.parseInputFiles();
     self.parseDependentDylibs() catch |err| {
@@ -482,7 +482,7 @@ pub fn flushModule(self: *MachO, arena: Allocator, tid: Zcu.PerThread.Id, prog_n
         }
     };
 
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (self.base.hasErrors()) return error.FlushFailure;
 
     {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -1496,8 +1496,8 @@ fn reportUndefs(self: *MachO) !void {
         const notes = entry.value_ptr.*;
         const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
 
-        var err = try self.addErrorWithNotes(nnotes);
-        try err.addMsg(self, "undefined symbol: {s}", .{undef_sym.getName(self)});
+        var err = try self.base.addErrorWithNotes(nnotes);
+        try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
         has_undefs = true;
 
         var inote: usize = 0;
@@ -1505,12 +1505,12 @@ fn reportUndefs(self: *MachO) !void {
             const note = notes.items[inote];
             const file = self.getFile(note.file).?;
             const atom = note.getAtom(self).?;
-            try err.addNote(self, "referenced by {}:{s}", .{ file.fmtPath(), atom.getName(self) });
+            try err.addNote("referenced by {}:{s}", .{ file.fmtPath(), atom.getName(self) });
         }
 
         if (notes.items.len > max_notes) {
             const remaining = notes.items.len - max_notes;
-            try err.addNote(self, "referenced {d} more times", .{remaining});
+            try err.addNote("referenced {d} more times", .{remaining});
         }
     }
     if (has_undefs) return error.HasUndefinedSymbols;
@@ -3286,13 +3286,13 @@ fn growSectionNonRelocatable(self: *MachO, sect_index: u8, needed_size: u64) !vo
 
     const mem_capacity = self.allocatedSizeVirtual(seg.vmaddr);
     if (needed_size > mem_capacity) {
-        var err = try self.addErrorWithNotes(2);
-        try err.addMsg(self, "fatal linker error: cannot expand segment seg({d})({s}) in virtual memory", .{
+        var err = try self.base.addErrorWithNotes(2);
+        try err.addMsg("fatal linker error: cannot expand segment seg({d})({s}) in virtual memory", .{
             seg_id,
             seg.segName(),
         });
-        try err.addNote(self, "TODO: emit relocations to memory locations in self-hosted backends", .{});
-        try err.addNote(self, "as a workaround, try increasing pre-allocated virtual memory of each segment", .{});
+        try err.addNote("TODO: emit relocations to memory locations in self-hosted backends", .{});
+        try err.addNote("as a workaround, try increasing pre-allocated virtual memory of each segment", .{});
     }
 
     seg.vmsize = needed_size;
@@ -3581,65 +3581,15 @@ pub fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
     return null;
 }
 
-const ErrorWithNotes = struct {
-    /// Allocated index in comp.link_errors array.
-    index: usize,
-
-    /// Next available note slot.
-    note_slot: usize = 0,
-
-    pub fn addMsg(
-        err: ErrorWithNotes,
-        macho_file: *MachO,
-        comptime format: []const u8,
-        args: anytype,
-    ) error{OutOfMemory}!void {
-        const comp = macho_file.base.comp;
-        const gpa = comp.gpa;
-        const err_msg = &comp.link_errors.items[err.index];
-        err_msg.msg = try std.fmt.allocPrint(gpa, format, args);
-    }
-
-    pub fn addNote(
-        err: *ErrorWithNotes,
-        macho_file: *MachO,
-        comptime format: []const u8,
-        args: anytype,
-    ) error{OutOfMemory}!void {
-        const comp = macho_file.base.comp;
-        const gpa = comp.gpa;
-        const err_msg = &comp.link_errors.items[err.index];
-        assert(err.note_slot < err_msg.notes.len);
-        err_msg.notes[err.note_slot] = .{ .msg = try std.fmt.allocPrint(gpa, format, args) };
-        err.note_slot += 1;
-    }
-};
-
-pub fn addErrorWithNotes(self: *MachO, note_count: usize) error{OutOfMemory}!ErrorWithNotes {
-    const comp = self.base.comp;
-    const gpa = comp.gpa;
-    try comp.link_errors.ensureUnusedCapacity(gpa, 1);
-    return self.addErrorWithNotesAssumeCapacity(note_count);
-}
-
-fn addErrorWithNotesAssumeCapacity(self: *MachO, note_count: usize) error{OutOfMemory}!ErrorWithNotes {
-    const comp = self.base.comp;
-    const gpa = comp.gpa;
-    const index = comp.link_errors.items.len;
-    const err = comp.link_errors.addOneAssumeCapacity();
-    err.* = .{ .msg = undefined, .notes = try gpa.alloc(link.File.ErrorMsg, note_count) };
-    return .{ .index = index };
-}
-
 pub fn reportParseError(
     self: *MachO,
     path: []const u8,
     comptime format: []const u8,
     args: anytype,
 ) error{OutOfMemory}!void {
-    var err = try self.addErrorWithNotes(1);
-    try err.addMsg(self, format, args);
-    try err.addNote(self, "while parsing {s}", .{path});
+    var err = try self.base.addErrorWithNotes(1);
+    try err.addMsg(format, args);
+    try err.addNote("while parsing {s}", .{path});
 }
 
 pub fn reportParseError2(
@@ -3648,9 +3598,9 @@ pub fn reportParseError2(
     comptime format: []const u8,
     args: anytype,
 ) error{OutOfMemory}!void {
-    var err = try self.addErrorWithNotes(1);
-    try err.addMsg(self, format, args);
-    try err.addNote(self, "while parsing {}", .{self.getFile(file_index).?.fmtPath()});
+    var err = try self.base.addErrorWithNotes(1);
+    try err.addMsg(format, args);
+    try err.addNote("while parsing {}", .{self.getFile(file_index).?.fmtPath()});
 }
 
 fn reportMissingLibraryError(
@@ -3659,10 +3609,10 @@ fn reportMissingLibraryError(
     comptime format: []const u8,
     args: anytype,
 ) error{OutOfMemory}!void {
-    var err = try self.addErrorWithNotes(checked_paths.len);
-    try err.addMsg(self, format, args);
+    var err = try self.base.addErrorWithNotes(checked_paths.len);
+    try err.addMsg(format, args);
     for (checked_paths) |path| {
-        try err.addNote(self, "tried {s}", .{path});
+        try err.addNote("tried {s}", .{path});
     }
 }
 
@@ -3674,12 +3624,12 @@ fn reportMissingDependencyError(
     comptime format: []const u8,
     args: anytype,
 ) error{OutOfMemory}!void {
-    var err = try self.addErrorWithNotes(2 + checked_paths.len);
-    try err.addMsg(self, format, args);
-    try err.addNote(self, "while resolving {s}", .{path});
-    try err.addNote(self, "a dependency of {}", .{self.getFile(parent).?.fmtPath()});
+    var err = try self.base.addErrorWithNotes(2 + checked_paths.len);
+    try err.addMsg(format, args);
+    try err.addNote("while resolving {s}", .{path});
+    try err.addNote("a dependency of {}", .{self.getFile(parent).?.fmtPath()});
     for (checked_paths) |p| {
-        try err.addNote(self, "tried {s}", .{p});
+        try err.addNote("tried {s}", .{p});
     }
 }
 
@@ -3690,16 +3640,16 @@ fn reportDependencyError(
     comptime format: []const u8,
     args: anytype,
 ) error{OutOfMemory}!void {
-    var err = try self.addErrorWithNotes(2);
-    try err.addMsg(self, format, args);
-    try err.addNote(self, "while parsing {s}", .{path});
-    try err.addNote(self, "a dependency of {}", .{self.getFile(parent).?.fmtPath()});
+    var err = try self.base.addErrorWithNotes(2);
+    try err.addMsg(format, args);
+    try err.addNote("while parsing {s}", .{path});
+    try err.addNote("a dependency of {}", .{self.getFile(parent).?.fmtPath()});
 }
 
 pub fn reportUnexpectedError(self: *MachO, comptime format: []const u8, args: anytype) error{OutOfMemory}!void {
-    var err = try self.addErrorWithNotes(1);
-    try err.addMsg(self, format, args);
-    try err.addNote(self, "please report this as a linker bug on https://github.com/ziglang/zig/issues/new/choose", .{});
+    var err = try self.base.addErrorWithNotes(1);
+    try err.addMsg(format, args);
+    try err.addNote("please report this as a linker bug on https://github.com/ziglang/zig/issues/new/choose", .{});
 }
 
 fn reportDuplicates(self: *MachO) error{ HasDuplicates, OutOfMemory }!void {
@@ -3715,20 +3665,20 @@ fn reportDuplicates(self: *MachO) error{ HasDuplicates, OutOfMemory }!void {
         const notes = entry.value_ptr.*;
         const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
 
-        var err = try self.addErrorWithNotes(nnotes + 1);
-        try err.addMsg(self, "duplicate symbol definition: {s}", .{sym.getName(self)});
-        try err.addNote(self, "defined by {}", .{sym.getFile(self).?.fmtPath()});
+        var err = try self.base.addErrorWithNotes(nnotes + 1);
+        try err.addMsg("duplicate symbol definition: {s}", .{sym.getName(self)});
+        try err.addNote("defined by {}", .{sym.getFile(self).?.fmtPath()});
         has_dupes = true;
 
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
             const file = self.getFile(notes.items[inote]).?;
-            try err.addNote(self, "defined by {}", .{file.fmtPath()});
+            try err.addNote("defined by {}", .{file.fmtPath()});
         }
 
         if (notes.items.len > max_notes) {
             const remaining = notes.items.len - max_notes;
-            try err.addNote(self, "defined {d} more times", .{remaining});
+            try err.addNote("defined {d} more times", .{remaining});
         }
     }
     if (has_dupes) return error.HasDuplicates;
