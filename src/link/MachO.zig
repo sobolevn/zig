@@ -907,25 +907,25 @@ pub fn parseInputFiles(self: *MachO) !void {
         defer wg.wait();
 
         for (self.objects.items) |index| {
-            tp.spawnWg(&wg, parseInputFileWorker, .{ self, index });
+            tp.spawnWg(&wg, parseInputFileWorker, .{ self, self.getFile(index).? });
         }
         for (self.dylibs.items) |index| {
-            tp.spawnWg(&wg, parseInputFileWorker, .{ self, index });
+            tp.spawnWg(&wg, parseInputFileWorker, .{ self, self.getFile(index).? });
         }
     }
 
     if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailure;
 }
 
-fn parseInputFileWorker(self: *MachO, index: File.Index) void {
-    self.getFile(index).?.parse(self) catch |err| {
+fn parseInputFileWorker(self: *MachO, file: File) void {
+    file.parse(self) catch |err| {
         switch (err) {
             error.MalformedObject,
             error.MalformedDylib,
             error.InvalidCpuArch,
             error.InvalidTarget,
             => {}, // already reported
-            else => |e| self.reportParseError2(index, "unexpected error: parsing input file failed with error {s}", .{@errorName(e)}) catch {},
+            else => |e| self.reportParseError2(file.getIndex(), "unexpected error: parsing input file failed with error {s}", .{@errorName(e)}) catch {},
         }
         _ = self.has_errors.swap(true, .seq_cst);
     };
@@ -1286,13 +1286,50 @@ fn markLive(self: *MachO) void {
 }
 
 fn convertTentativeDefsAndResolveSpecialSymbols(self: *MachO) !void {
-    for (self.objects.items) |index| {
-        try self.getFile(index).?.object.convertTentativeDefinitions(self);
+    const tp = self.base.comp.thread_pool;
+    var wg: WaitGroup = .{};
+    {
+        wg.reset();
+        defer wg.wait();
+        for (self.objects.items) |index| {
+            tp.spawnWg(&wg, convertTentativeDefinitionsWorker, .{ self, self.getFile(index).?.object });
+        }
+        if (self.getInternalObject()) |obj| {
+            tp.spawnWg(&wg, resolveSpecialSymbolsWorker, .{ self, obj });
+        }
     }
-    if (self.getInternalObject()) |obj| {
-        try obj.resolveBoundarySymbols(self);
-        try obj.resolveObjcMsgSendSymbols(self);
-    }
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailure;
+}
+
+fn convertTentativeDefinitionsWorker(self: *MachO, object: *Object) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+    object.convertTentativeDefinitions(self) catch |err| {
+        self.reportParseError2(
+            object.index,
+            "unexpected error occurred while converting tentative symbols into defined symbols: {s}",
+            .{@errorName(err)},
+        ) catch {};
+        _ = self.has_errors.swap(true, .seq_cst);
+    };
+}
+
+fn resolveSpecialSymbolsWorker(self: *MachO, obj: *InternalObject) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+    obj.resolveBoundarySymbols(self) catch |err| {
+        self.reportUnexpectedError("unexpected error occurred while resolving boundary symbols: {s}", .{
+            @errorName(err),
+        }) catch {};
+        _ = self.has_errors.swap(true, .seq_cst);
+        return;
+    };
+    obj.resolveObjcMsgSendSymbols(self) catch |err| {
+        self.reportUnexpectedError("unexpected error occurred while resolving ObjC msgsend stubs: {s}", .{
+            @errorName(err),
+        }) catch {};
+        _ = self.has_errors.swap(true, .seq_cst);
+    };
 }
 
 pub fn dedupLiterals(self: *MachO) !void {
@@ -1313,14 +1350,20 @@ pub fn dedupLiterals(self: *MachO) !void {
         try object.resolveLiterals(&lp, self);
     }
 
-    if (self.getZigObject()) |zo| {
-        zo.dedupLiterals(lp, self);
-    }
-    for (self.objects.items) |index| {
-        self.getFile(index).?.object.dedupLiterals(lp, self);
-    }
-    if (self.getInternalObject()) |object| {
-        object.dedupLiterals(lp, self);
+    const tp = self.base.comp.thread_pool;
+    var wg: WaitGroup = .{};
+    {
+        wg.reset();
+        defer wg.wait();
+        if (self.getZigObject()) |zo| {
+            tp.spawnWg(&wg, File.dedupLiterals, .{ zo.asFile(), lp, self });
+        }
+        for (self.objects.items) |index| {
+            tp.spawnWg(&wg, File.dedupLiterals, .{ self.getFile(index).?, lp, self });
+        }
+        if (self.getInternalObject()) |object| {
+            tp.spawnWg(&wg, File.dedupLiterals, .{ object.asFile(), lp, self });
+        }
     }
 }
 
@@ -1334,16 +1377,39 @@ fn claimUnresolved(self: *MachO) void {
 }
 
 fn checkDuplicates(self: *MachO) !void {
-    if (self.getZigObject()) |zo| {
-        try zo.asFile().checkDuplicates(self);
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const tp = self.base.comp.thread_pool;
+    var wg: WaitGroup = .{};
+    {
+        wg.reset();
+        defer wg.wait();
+        if (self.getZigObject()) |zo| {
+            tp.spawnWg(&wg, checkDuplicatesWorker, .{ self, zo.asFile() });
+        }
+        for (self.objects.items) |index| {
+            tp.spawnWg(&wg, checkDuplicatesWorker, .{ self, self.getFile(index).? });
+        }
+        if (self.getInternalObject()) |obj| {
+            tp.spawnWg(&wg, checkDuplicatesWorker, .{ self, obj.asFile() });
+        }
     }
-    for (self.objects.items) |index| {
-        try self.getFile(index).?.checkDuplicates(self);
-    }
-    if (self.getInternalObject()) |obj| {
-        try obj.asFile().checkDuplicates(self);
-    }
+
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailure;
+
     try self.reportDuplicates();
+}
+
+fn checkDuplicatesWorker(self: *MachO, file: File) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+    file.checkDuplicates(self) catch |err| {
+        self.reportParseError2(file.getIndex(), "failed to check for duplicate definitions: {s}", .{
+            @errorName(err),
+        }) catch {};
+        _ = self.has_errors.swap(true, .seq_cst);
+    };
 }
 
 fn markImportsAndExports(self: *MachO) void {
